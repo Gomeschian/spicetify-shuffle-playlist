@@ -52,7 +52,10 @@
       return array;
     };
 
-    const createBackupPlaylist = async (originalPlaylistId, originalTracks) => {
+    const createBackupPlaylist = async (
+      originalPlaylistId,
+      originalTrackURIs
+    ) => {
       try {
         // Get the name of the original playlist
         const originalPlaylistName = await getPlaylistName(originalPlaylistId);
@@ -65,7 +68,7 @@
         const backupPlaylistId = await createEmptyPlaylist(backupPlaylistName);
 
         // Copy all tracks from the original playlist to the backup playlist
-        await updatePlaylistTracks(backupPlaylistId, originalTracks);
+        await updatePlaylistTracks(backupPlaylistId, originalTrackURIs);
 
         return backupPlaylistId;
       } catch (error) {
@@ -106,13 +109,15 @@
       }
     };
 
-    const replacePlaylistTracks = async (playlistId, tracks) => {
+    const replacePlaylistTracks = async (playlistId, trackURIs) => {
       const requestURL = `https://api.spotify.com/v1/playlists/${playlistId}/tracks`;
-      const requestBody = JSON.stringify({
-        uris: tracks.map((track) => track.track.uri),
-      });
+      const requestBody = {
+        uris: trackURIs.map((uri) => `spotify:track:${uri}`),
+      };
+      console.log("track URIs:", trackURIs);
+      console.log("Request body:", requestBody);
       const response = await CosmosAsync.put(requestURL, requestBody);
-
+      console.log("response", response);
       if (!response.snapshot_id) {
         console.error("Error replacing playlist tracks");
         throw new Error(`Failed to replace playlist tracks.`);
@@ -132,27 +137,29 @@
       }
     };
 
-    const getAllPlaylistTracks = async (playlistId) => {
-      let allTracks = [];
-      let url = `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100`;
+    const fetchPlaylistData = async (playlistId) => {
+      const response = await CosmosAsync.get(
+        `sp://core-playlist/v1/playlist/spotify:playlist:${playlistID}/rows`
+      );
 
-      while (url) {
-        const response = await CosmosAsync.get(url);
-
-        if (!response.items) {
-          console.log("Failed to fetch playlist tracks.");
-          throw new Error("Failed to fetch playlist tracks.");
-        }
-
-        allTracks = allTracks.concat(response.items);
-
-        console.log("Fetched tracks:", allTracks.length);
-        url = response.next; // Set the next URL for the next iteration
+      if (!response.rows) {
+        console.log("Failed to fetch playlist data.");
+        throw new Error("Failed to fetch playlist data.");
       }
-      console.log("All tracks fetched:", allTracks);
-      return allTracks;
+
+      const playlistData = response;
+      return playlistData;
     };
 
+    const getAllPlaylistTracks = (playlistData) => {
+      const allTrackUris = playlistData.rows
+        .map((track) => track.link)
+        .map((uri) => uri.split(":")[2]);
+      console.log("Fetched tracks:", allTrackUris.length);
+      console.log("All tracks fetched:", allTrackUris);
+
+      return allTrackUris;
+    };
     async function createEmptyPlaylist(
       newPlaylistName = "Spicetify Shuffle Backup"
     ) {
@@ -172,17 +179,21 @@
       return newPlaylistID;
     }
 
-    const updatePlaylistTracks = async (playlistId, tracks) => {
+    const updatePlaylistTracks = async (playlistId, trackURIs) => {
       const requestURL = `https://api.spotify.com/v1/playlists/${playlistId}/tracks`;
 
       const batchSize = 100;
 
-      for (let i = 0; i < tracks.length; i += batchSize) {
-        const batch = tracks.slice(i, i + batchSize);
-        const requestBody = JSON.stringify({
-          uris: batch.map((track) => track.track.uri),
-        });
-        const response = await CosmosAsync.post(requestURL, requestBody);
+      for (let i = 0; i < trackURIs.length; i += batchSize) {
+        const batch = trackURIs.slice(i, i + batchSize);
+        const requestBody = {
+          uris: batch.map((uri) => `spotify:track:${uri}`),
+        };
+        console.log(requestBody);
+        const response = await CosmosAsync.put(
+          requestURL,
+          JSON.stringify(requestBody)
+        );
 
         if (!response.snapshot_id) {
           console.error("Error updating playlist tracks");
@@ -219,16 +230,18 @@
     await new Promise((resolve) => setTimeout(resolve, API_DELAY));
 
     try {
-      const originalTracks = await getAllPlaylistTracks(playlistID);
+      const playlistData = await fetchPlaylistData(playlistID);
+
+      const originalTrackURIs = getAllPlaylistTracks(playlistData);
 
       // Create a backup playlist
       const backupPlaylistID = await createBackupPlaylist(
         playlistID,
-        originalTracks
+        originalTrackURIs
       );
 
       // Shuffle the tracks
-      const shuffledTracks = fisherYatesShuffle(originalTracks);
+      const shuffledTracks = fisherYatesShuffle(originalTrackURIs);
 
       // Update the original playlist with the shuffled tracks
       await updatePlaylist(playlistID, shuffledTracks);
@@ -236,6 +249,7 @@
       Spicetify.showNotification(
         "Playlist shuffled successfully! May need to refresh/reload your playlist."
       );
+
       // Optionally delete the backup playlist automatically
       // await unFollowBackupPlaylist(backupPlaylistID);
     } catch (error) {
